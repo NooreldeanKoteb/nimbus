@@ -14,7 +14,7 @@ addressable as a peer that can be handed work and can hand work back.
 ```
 $ ./scripts/build.sh                  # one static binary, no dependencies
 $ nimbus login                        # device flow to your git provider
-$ nimbus init --create-repo           # creates the state repo, sets this device up
+$ nimbus init --new personal          # creates the state repo, sets this device up
 $ nimbus resume                       # continue where you left off
 ```
 
@@ -83,22 +83,49 @@ released for it to fetch, so it is not the install instruction yet.
 
 ```sh
 nimbus login                    # GitHub device flow — prints a code, you paste it
-nimbus init --create-repo       # provisions the private state repo, then sets up
+nimbus init --new personal      # creates the private state repo, then sets up
 ```
-
-`--create-repo` makes the repository through the provider API, so first-run
-setup never involves visiting a browser to click "New repository".
 
 ### Every device after that
 
 ```sh
 nimbus login
-nimbus init --remote https://github.com/you/nimbus-state --alias studio
+nimbus init --alias studio
 ```
 
-`init` installs Claude Code (resolving its prerequisites first), links your
+**No URL to remember.** `init` scans the account you just logged into, finds the
+systems already there, and joins the one it finds. You only reach for a flag
+when there is a genuine choice to make.
+
+`init` then installs Claude Code (resolving its prerequisites first), links your
 config, registers the Nimbus MCP server and the `SessionStart` hook, publishes
 this device's profile, and pushes. Re-running it changes nothing.
+
+### Systems
+
+A **system** is one state repo and the fleet of devices on it. Most people want
+one. You can have several — personal and work, say — and a device joins one at a
+time.
+
+```sh
+nimbus systems                  # what this account can reach, and where you are
+nimbus init --new work          # start another one
+nimbus init --system work       # join a specific one, no prompting
+nimbus init --remote <url>      # join one somebody shared with you
+```
+
+With one system, `init` takes it silently. With several it lists them and asks —
+unless nobody is there to answer, in which case it names them and tells you to
+pass `--system`, because a prompt written into a pipe is a hang.
+
+Systems are found two ways. A `nimbus-state` topic on the repository narrows
+hundreds of repos to a handful without opening any of them; a `nimbus.json`
+marker at the repo root then decides, because a topic can be deleted by hand and
+a repo shared as a link may never have had one. **The marker is the authority.**
+
+That marker is also a safety check. `--remote <url>` verifies it before cloning,
+so pointing nimbus at an ordinary repository is refused instead of quietly
+filling somebody's project with device profiles and an audit trail.
 
 ---
 
@@ -194,7 +221,8 @@ requires L3.
 | Command | |
 |---|---|
 | `nimbus login` / `logout` / `whoami` | Git provider auth via device flow |
-| `nimbus init` | Set this device up from the state repo |
+| `nimbus init` | Set this device up; finds your system automatically |
+| `nimbus systems` | List the systems this account can reach |
 | `nimbus doctor` | Profile the OS, hardware, and tooling; diff against the manifest |
 | `nimbus alias [name]` | Show or set this device's human-readable name |
 | `nimbus fleet` | Every device, with capabilities and what is missing |

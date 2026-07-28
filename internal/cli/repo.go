@@ -28,24 +28,36 @@ func runRepo(ctx context.Context, env *Env, args []string) error {
 	}
 }
 
+// provider returns the repository-capable provider and the stored identity.
+//
+// Shared by repo creation and system discovery, so "not logged in" and "this
+// provider cannot do that" read the same wherever they surface.
+func (e *Env) provider() (*auth.GitHub, *auth.Identity, error) {
+	provider, err := providerFor("github")
+	if err != nil {
+		return nil, nil, err
+	}
+	gh, ok := provider.(*auth.GitHub)
+	if !ok {
+		return nil, nil, fmt.Errorf("provider %s cannot manage repositories", provider.Name())
+	}
+
+	id, err := e.store().Get("github")
+	if err != nil {
+		return nil, nil, errors.New("not logged in (run `nimbus login` first)")
+	}
+	return gh, id, nil
+}
+
 // ensureStateRepo finds or creates the remote state repo and returns its URL.
 func ensureStateRepo(ctx context.Context, env *Env, name string, private bool) (string, bool, error) {
 	if name == "" {
 		name = DefaultStateRepoName
 	}
 
-	provider, err := providerFor("github")
+	gh, id, err := env.provider()
 	if err != nil {
 		return "", false, err
-	}
-	gh, ok := provider.(*auth.GitHub)
-	if !ok {
-		return "", false, fmt.Errorf("provider %s cannot create repositories", provider.Name())
-	}
-
-	id, err := env.store().Get("github")
-	if err != nil {
-		return "", false, fmt.Errorf("not logged in (run `nimbus login` first)")
 	}
 
 	repo, created, err := gh.EnsureRepo(ctx, id, name, private)

@@ -21,7 +21,19 @@ type Repository struct {
 	SSHURL   string `json:"ssh_url"`
 	HTMLURL  string `json:"html_url"`
 	Private  bool   `json:"private"`
-	Empty    bool   `json:"-"`
+	// Topics is the provider-side index used to find state repos cheaply.
+	Topics []string `json:"topics,omitempty"`
+	Empty  bool     `json:"-"`
+}
+
+// HasTopic reports whether a repository carries a topic.
+func (r Repository) HasTopic(topic string) bool {
+	for _, t := range r.Topics {
+		if strings.EqualFold(t, topic) {
+			return true
+		}
+	}
+	return false
 }
 
 // StateRepoName is the repository nimbus creates for its own state when none

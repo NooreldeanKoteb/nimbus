@@ -17,12 +17,15 @@ import (
 func runInit(ctx context.Context, env *Env, args []string) error {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	fs.SetOutput(env.Err)
-	remote := fs.String("remote", "", "state repo URL to clone (or set as origin)")
-	createRepo := fs.Bool("create-repo", false, "create the state repo on your git provider if absent")
-	repoName := fs.String("repo-name", DefaultStateRepoName, "name for the created state repo")
+	remote := fs.String("remote", "", "state repo URL to join (a link someone shared)")
+	system := fs.String("system", "", "which system to join, when the account has several")
+	newSystem := fs.String("new", "", "create a new system with this name")
+	createRepo := fs.Bool("create-repo", false, "create the state repo if absent (same as --new)")
+	repoName := fs.String("repo-name", DefaultStateRepoName, "repository name for a system being created")
 	alias := fs.String("alias", "", "name for this device (default: derived from hostname)")
 	skipClaude := fs.Bool("skip-claude", false, "do not install Claude Code")
 	noSudo := fs.Bool("no-sudo", false, "never prompt for administrator access")
+	offline := fs.Bool("offline", false, "skip provider discovery and work with the local repo only")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -42,25 +45,30 @@ func runInit(ctx context.Context, env *Env, args []string) error {
 	}
 	fmt.Fprintf(env.Out, "device %s (%s)\n\n", id.Label(), id.Hostname)
 
-	// 1. State repo. --create-repo provisions it on the provider first, so a
-	//    first run needs no trip to a browser to make a repository by hand.
-	if *createRepo && *remote == "" {
-		url, created, err := ensureStateRepo(ctx, env, *repoName, true)
-		if err != nil {
-			return err
-		}
-		if created {
-			fmt.Fprintf(env.Out, "repo   created %s\n", url)
-		} else {
-			fmt.Fprintf(env.Out, "repo   using existing %s\n", url)
-		}
-		*remote = url
-	}
-
-	repo, err := setupRepo(ctx, env, *remote)
+	// 1. Choose a system. On a device that already has one this is a no-op; on
+	//    a new device it is the whole point — nobody should have to remember a
+	//    repository URL to sit down at a machine.
+	choice, err := chooseSystem(ctx, env, systemChoice{
+		Remote: *remote, Name: *system, New: *newSystem,
+		RepoName: *repoName, Create: *createRepo, Offline: *offline,
+	})
 	if err != nil {
 		return err
 	}
+
+	repo, err := setupRepo(ctx, env, choice.Remote)
+	if err != nil {
+		return err
+	}
+
+	// 2. Stamp the marker. A system created before markers existed has none, so
+	//    this both writes it for new systems and backfills old ones, which is
+	//    what keeps an existing fleet discoverable after an upgrade.
+	marker, err := ensureMarker(ctx, env, repo, choice)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(env.Out, "system %s\n", marker.Label())
 
 	log, err := env.auditLog(id.ID)
 	if err != nil {
@@ -68,7 +76,7 @@ func runInit(ctx context.Context, env *Env, args []string) error {
 	}
 	log.Record("local", "init.start", id.ID, "nimbus init", nil)
 
-	// 2. Manifest — seeded with a default on a brand-new fleet.
+	// 3. Manifest — seeded with a default on a brand-new fleet.
 	manifest, err := install.LoadManifest(env.Paths.ManifestFile())
 	if err != nil {
 		return err
@@ -93,7 +101,7 @@ func runInit(ctx context.Context, env *Env, args []string) error {
 		}
 	}
 
-	// 3. Adopt before linking. On the first device this captures an existing
+	// 4. Adopt before linking. On the first device this captures an existing
 	//    ~/.claude into the repo; on later devices it is a no-op.
 	localClaude := localClaudeDir()
 	repoClaude := env.Paths.RepoClaudeDir()
@@ -110,7 +118,7 @@ func runInit(ctx context.Context, env *Env, args []string) error {
 	})
 	report(env, log, install.LinkClaudeConfig(repoClaude, localClaude, manifest.LinkConfig))
 
-	// 4. Claude Code, then the MCP servers that depend on it. Its installer
+	// 5. Claude Code, then the MCP servers that depend on it. Its installer
 	//    has its own prerequisites, which a bare device will not have.
 	if !*skipClaude {
 		fmt.Fprintln(env.Out, "\nclaude code")
@@ -141,7 +149,7 @@ func runInit(ctx context.Context, env *Env, args []string) error {
 		report(env, log, install.InstallMCPServers(ctx, manifest.MCPServers))
 	}
 
-	// 5. Publish this device's profile so the fleet can see it.
+	// 6. Publish this device's profile so the fleet can see it.
 	fmt.Fprintln(env.Out, "\nprofile")
 	profile := device.Detect(ctx, id, nil)
 	path, err := profile.Save(env.Paths.Repo)
@@ -151,7 +159,7 @@ func runInit(ctx context.Context, env *Env, args []string) error {
 	fmt.Fprintf(env.Out, "  + published   %s as %s\n", filepath.Base(path), id.Label())
 	log.Record("local", "doctor.publish", id.ID, "device profile published", nil)
 
-	// 6. Commit and push. The audit record is written before syncing so the
+	// 7. Commit and push. The audit record is written before syncing so the
 	//    sync itself carries a complete log of the run.
 	log.Record("local", "init.done", id.ID, "nimbus init complete", nil)
 	fmt.Fprintln(env.Out)

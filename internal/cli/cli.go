@@ -43,6 +43,7 @@ func init() {
 	commands = []command{
 		{"init", "set up this device from the state repo", runInit},
 		{"repo", "create or inspect the remote state repo", runRepo},
+		{"systems", "list the nimbus systems this account can reach", runSystems},
 		{"doctor", "profile this device and report what is missing", runDoctor},
 		{"fleet", "list every device published to the state repo", runFleet},
 		{"alias", "show or set this device's name", runAlias},

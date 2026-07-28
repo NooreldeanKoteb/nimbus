@@ -202,6 +202,17 @@ check "daemon no origin"   "/nimbus daemon run --once | grep -qE 'offline|synced
 check "daemon status"      "/nimbus daemon status | grep -q 'not installed'"
 check "daemon usage"       "! /nimbus daemon frobnicate"
 
+# --- system discovery: a second device should need no URL (§4b) ---
+# Discovery itself needs the provider, so what is checkable with no network is
+# that the marker every device is found by actually gets written and committed.
+check "marker written"     "test -f $NIMBUS_HOME/repo/nimbus.json"
+check "marker is tagged"   "grep -q '\"nimbus\": *\"nimbus-state\"' $NIMBUS_HOME/repo/nimbus.json"
+check "marker has an id"   "grep -q '\"id\"' $NIMBUS_HOME/repo/nimbus.json"
+check "marker committed"   "! /nimbus state status | grep -q nimbus.json"
+check "init reports it"    "/nimbus init --skip-claude | grep -qE '^system'"
+check "systems needs auth" "! /nimbus systems"
+check "offline init works" "/nimbus init --skip-claude --offline | grep -q ready"
+
 # --- Phase 4: autonomy ladder, invariants, system journal, boot resume ---
 check "default is l1"      "/nimbus autonomy | grep -q 'level   L1'"
 check "shows the ladder"   "/nimbus autonomy | grep -q 'L3  system configuration'"

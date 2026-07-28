@@ -100,14 +100,14 @@ container rather than a developer machine, which is the only way it surfaces.
 ```
 $ curl -fsSL <installer> | sh        # one static binary, no deps (unpublished)
 $ nimbus login                       # device flow → git provider
-$ nimbus init --create-repo          # creates the state repo, then sets the device up
+$ nimbus init --new personal         # creates the state repo, then sets the device up
 $ nimbus resume                      # continue where you left off
 ```
 
-`--create-repo` provisions the private state repo through the provider API
-using the token from `nimbus login`, so first-run setup never requires visiting
-a browser to make a repository by hand. Later devices use
-`nimbus init --remote <url>`.
+`--new <name>` provisions the private state repo through the provider API using
+the token from `nimbus login`, so first-run setup never requires visiting a
+browser to make a repository by hand. Later devices need no URL at all — see
+§4b.
 
 Four commands, one of them a browser login. Auth is pluggable behind a
 `Provider` interface (GitHub first, then GitLab, then non-git backends) so
@@ -237,6 +237,61 @@ Two failure modes are deliberately distinguished:
 Sync failures never fail the command that triggered them: the work the user
 asked for already succeeded, and an unpushed commit is durable. Set
 `NIMBUS_NO_SYNC=1` to opt out entirely.
+
+### 4b. Finding a system (implemented)
+
+A **system** is one state repo plus the fleet of devices on it. The second
+device originally needed `nimbus init --remote <url>`, which meant remembering
+or going to look up a URL at exactly the moment the promise was "sit down at any
+machine, one command". Discovery removes that step.
+
+**Two mechanisms, and only one of them is authoritative.**
+
+| | Purpose | Trusted? |
+|---|---|---|
+| A `nimbus-state` provider topic | Narrows hundreds of repositories to a handful without opening any | No — a hint |
+| A `nimbus.json` marker at the repo root | Decides whether a repo is a system, and names it | Yes |
+
+The topic exists because the alternative is unaffordable: checking a marker
+requires reading a file, and reading a file from every repo on an account is
+either a lot of API calls or a lot of clones. The topic makes the candidate set
+small; the marker then decides.
+
+The marker has to be the authority because the topic is not durable. It can be
+deleted by hand, a fork does not carry one, and a repository shared as a link
+from somebody else's account may never have had one. A repo whose name matches
+the `nimbus-state` convention is also treated as a candidate, so a fleet
+enrolled before this feature is still found rather than appearing to vanish on
+upgrade.
+
+**The marker is also a safety check, and this is the part that was actually
+broken before.** `--remote <url>` previously cloned whatever it was pointed at
+and began writing `nodes/`, `audit/`, and `secrets/` into it. Pointed at an
+ordinary project by a typo or a mis-paste, the first sign of trouble would have
+been a commit on somebody else's repository. Verifying the marker before cloning
+turns that into a refusal.
+
+**Selection rules.** Ordered so that automation never blocks:
+
+1. An explicit `--remote` wins, after verification.
+2. A device already on a system stays on it — re-running `init` never re-asks.
+3. `--new <name>` creates one.
+4. Otherwise discover: one match is taken silently, several are offered.
+
+Ambiguity in front of a person is a prompt. Ambiguity with nobody watching is an
+error listing the options and naming `--system`, because `init` runs in
+installers and containers where a prompt is a hang rather than a question. This
+reuses the attended/unattended distinction the autonomy ladder already defines
+(§12).
+
+**Identity survives renaming.** The marker carries a generated id alongside the
+name. The name is what people read and therefore what people change; anything
+that refers to a system refers to the id, so renaming does not orphan it.
+
+**A device belongs to one system at a time.** Every path in §4 is relative to a
+single `~/.nimbus`, so joining a second system means re-running `init` and
+pointing that directory at the other repo. Simultaneous membership would mean
+per-system paths throughout, which buys little for a single-user tool.
 
 ## 5. Components
 
