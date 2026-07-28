@@ -10,7 +10,9 @@ import (
 )
 
 // DefaultStateRepoName is the repository nimbus creates when none is named.
-const DefaultStateRepoName = "nimbus-state"
+// Defined by the auth package, which is what decides how a repository by that
+// name is described to the provider.
+const DefaultStateRepoName = auth.StateRepoName
 
 func runRepo(ctx context.Context, env *Env, args []string) error {
 	if len(args) == 0 {

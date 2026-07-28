@@ -227,3 +227,18 @@ func indexOf(haystack, needle string) int {
 	}
 	return -1
 }
+
+// A repo nimbus creates for something other than its own state must not be
+// labelled as a state repo. This shipped wrong: `nimbus repo create <anything>`
+// stamped the state-repo description onto it, so a source repo arrived on
+// GitHub claiming to hold device profiles and an audit trail.
+func TestOnlyTheStateRepoGetsTheStateDescription(t *testing.T) {
+	if got := describeRepo(StateRepoName); got == "" {
+		t.Error("the state repo has no description")
+	}
+	for _, name := range []string{"nimbus", "my-project", "nimbus-state-backup"} {
+		if got := describeRepo(name); got != "" {
+			t.Errorf("describeRepo(%q) = %q, want none — nimbus cannot know what it holds", name, got)
+		}
+	}
+}

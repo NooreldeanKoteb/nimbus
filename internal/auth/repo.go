@@ -24,6 +24,22 @@ type Repository struct {
 	Empty    bool   `json:"-"`
 }
 
+// StateRepoName is the repository nimbus creates for its own state when none
+// is named. It lives here rather than in the CLI because this package is what
+// decides how a repository by that name is described.
+const StateRepoName = "nimbus-state"
+
+// describeRepo returns a description only for a repo nimbus can vouch for.
+//
+// Anything else is a repository the user asked for by name, and nimbus has no
+// idea what it holds — so it says nothing rather than guessing wrong.
+func describeRepo(name string) string {
+	if name == StateRepoName {
+		return "Nimbus state: device profiles, memory, config, and audit trail"
+	}
+	return ""
+}
+
 // CreateRepo creates a repository on the authenticated account.
 //
 // autoInit is important: a repo with no initial commit cannot be cloned, and
@@ -37,10 +53,14 @@ func (g *GitHub) CreateRepo(ctx context.Context, id *Identity, name string, priv
 	}
 
 	body, err := json.Marshal(map[string]any{
-		"name":        name,
-		"private":     private,
-		"auto_init":   true,
-		"description": "Nimbus state: device profiles, memory, config, and audit trail",
+		"name":      name,
+		"private":   private,
+		"auto_init": true,
+		// Empty rather than a fixed string: this used to stamp "Nimbus state:
+		// device profiles, memory, config, and audit trail" onto every repo it
+		// created, so a repo made for anything else arrived mislabelled as a
+		// state repo. A wrong description is worse than none.
+		"description": describeRepo(name),
 	})
 	if err != nil {
 		return nil, err
