@@ -455,7 +455,7 @@ long-term), the `SessionStart` hook.
 
 *Open:* tokens are `0600` on disk rather than in the OS keychain.
 
-### Phase 3 — Mesh ✅ (partial)
+### Phase 3 — Mesh ✅
 
 Git-backed message bus, `nimbus send` / `dispatch` / `inbox` / `outbox` / `ack`,
 the Nimbus MCP server, and `nimbusd` — a per-user systemd or launchd unit that

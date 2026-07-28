@@ -1048,14 +1048,14 @@ plus the two-tier memory model with promotion and decay (§8).
 *Changed: the redaction hook became a refusal at commit time instead (§12).*
 *Dropped: `--cloud`/`--teleport` integration — those flags do not exist (§7a).*
 
-**Phase 3 — Mesh. [PARTIAL]** Git-backed message bus (§6a): `nimbus send`,
+**Phase 3 — Mesh. [DONE]** Git-backed message bus (§6a): `nimbus send`,
 `dispatch`, `inbox`, `outbox`, `ack`, capability-checked routing, unread mail in
-the session brief. MCP server with fifteen tools (§6b). Daemon with per-user
+the session brief. MCP server with seventeen tools (§6b). Daemon with per-user
 service units (§6c).
 *Delivers: devices as peer agents, addressable by name, reachable from inside
 Claude.*
-*Remaining: unattended execution of dispatched work, `peer_tail` live streaming
-(needs a real transport).*
+*Closed by Phase 5: unattended execution of dispatched work, and `peer_tail`
+streaming — which turned out not to need a new transport after all (§6d).*
 *Reordered: tailnet moved behind the git bus — 547 modules and a second account
 for latency nimbus does not yet need (§6a).*
 
