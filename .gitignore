@@ -1,0 +1,8 @@
+# Build output. scripts/build.sh reproduces it from source, and six static
+# binaries is 59MB of churn per commit.
+/dist/
+
+# Go's own leavings.
+*.test
+*.out
+coverage.*
