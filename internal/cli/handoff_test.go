@@ -50,6 +50,21 @@ func (d *fakeDevice) try(args ...string) (string, error) {
 	return buf.String(), err
 }
 
+// tryUnattended runs a command the way the MCP server does — no person at the
+// keyboard — which is the state the autonomy ladder is actually measured
+// against. Going through run rather than Run is what makes that difference
+// reachable from a test at all.
+func (d *fakeDevice) tryUnattended(args ...string) (string, error) {
+	d.t.Helper()
+	d.t.Setenv("NIMBUS_HOME", d.home)
+	d.t.Setenv(device.NodeIDEnv, d.id)
+
+	var buf bytes.Buffer
+	env := &Env{Out: &buf, Err: &buf, In: bytes.NewReader(nil), Attended: false}
+	err := run(context.Background(), env, args)
+	return buf.String(), err
+}
+
 // bareRemote is a shared origin standing in for the user's private git repo.
 func bareRemote(t *testing.T) string {
 	t.Helper()

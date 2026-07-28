@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -22,6 +24,46 @@ type Policy struct {
 	// Note records why, which is the field a person reads six months later
 	// wondering who put this laptop at L3.
 	Note string `json:"note,omitempty"`
+	// Exec is what a peer may run here (invariant 3). It is deliberately part
+	// of this device's own file rather than something a sender attaches to a
+	// request: an allowlist the caller can influence is not an allowlist. Empty
+	// is the default and means no peer may run anything, so a device that has
+	// never thought about this cannot be talked into running something.
+	Exec []string `json:"exec,omitempty"`
+}
+
+// Allows reports whether a command is already on the peer-exec allowlist.
+func (p *Policy) Allows(command string) bool {
+	for _, c := range p.Exec {
+		if c == command {
+			return true
+		}
+	}
+	return false
+}
+
+// Allow adds a command to the peer-exec allowlist, reporting whether anything
+// changed so a caller can avoid writing a file and syncing for a no-op.
+func (p *Policy) Allow(command string) bool {
+	command = strings.TrimSpace(command)
+	if command == "" || p.Allows(command) {
+		return false
+	}
+	p.Exec = append(p.Exec, command)
+	sort.Strings(p.Exec)
+	return true
+}
+
+// Deny removes a command from the peer-exec allowlist.
+func (p *Policy) Deny(command string) bool {
+	command = strings.TrimSpace(command)
+	for i, c := range p.Exec {
+		if c == command {
+			p.Exec = append(p.Exec[:i], p.Exec[i+1:]...)
+			return true
+		}
+	}
+	return false
 }
 
 // File is a device's policy inside the state repo.

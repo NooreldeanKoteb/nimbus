@@ -231,3 +231,71 @@ func TestUnreadablePolicyFallsBackToTheDefault(t *testing.T) {
 		}
 	}
 }
+
+func TestTheExecAllowlistRoundTrips(t *testing.T) {
+	repo := t.TempDir()
+
+	p := &Policy{Node: "node-a", Level: L3}
+	if !p.Allow("systemctl status nimbus") {
+		t.Fatal("adding a command reported no change")
+	}
+	if p.Allow("systemctl status nimbus") {
+		t.Error("adding the same command twice reported a change")
+	}
+	p.Allow("journalctl -u nimbus")
+	if err := p.Save(repo); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded := Load(repo, "node-a")
+	if len(loaded.Exec) != 2 || !loaded.Allows("journalctl -u nimbus") {
+		t.Errorf("allowlist did not survive the round trip: %v", loaded.Exec)
+	}
+
+	if !loaded.Deny("journalctl -u nimbus") {
+		t.Error("removing a listed command reported no change")
+	}
+	if loaded.Deny("never-listed") {
+		t.Error("removing an unlisted command reported a change")
+	}
+	if loaded.Allows("journalctl -u nimbus") {
+		t.Error("a denied command is still allowed")
+	}
+}
+
+// The fallback for a corrupt policy must drop the allowlist too. Keeping a
+// remembered list while forgetting the level it was set alongside would leave a
+// device permitting commands under a ceiling nobody chose.
+func TestACorruptPolicyForgetsItsAllowlist(t *testing.T) {
+	repo := t.TempDir()
+	path := File(repo, "node-a")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"level":9,"exec":["rm -rf /"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := Load(repo, "node-a")
+	if len(p.Exec) != 0 {
+		t.Errorf("a policy that failed validation kept its allowlist: %v", p.Exec)
+	}
+	if p.Level != Default {
+		t.Errorf("level = %s, want the default %s", p.Level, Default)
+	}
+}
+
+// An empty allowlist is the default, and it has to mean "nothing", not
+// "anything" — a device nobody has configured must not be usable as one.
+func TestAnEmptyAllowlistPermitsNothing(t *testing.T) {
+	g := Guard{Level: L3}
+	for _, command := range []string{"echo hi", "ls", "systemctl status nimbus"} {
+		d := g.Allow(Action{Kind: ActExec, Command: command, FromPeer: true})
+		if d.Allowed {
+			t.Errorf("%q ran on a device with an empty allowlist", command)
+		}
+		if d.Invariant != 3 {
+			t.Errorf("%q was refused by invariant %d, want 3", command, d.Invariant)
+		}
+	}
+}

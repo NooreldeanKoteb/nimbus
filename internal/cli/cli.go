@@ -56,6 +56,8 @@ func init() {
 		{"memory", "remember, promote, and search facts across devices", runMemory},
 		{"send", "message another device", runSend},
 		{"dispatch", "hand a task to another device", runDispatch},
+		{"exec", "ask another device to run a command and stream the output back", runExec},
+		{"work", "do what peers have asked this device for", runWork},
 		{"inbox", "read messages addressed to this device", runInbox},
 		{"outbox", "show what this device has sent", runOutbox},
 		{"ack", "acknowledge a message", runAck},

@@ -46,6 +46,10 @@ func ownedPaths(nodeID string) []string {
 		// merge strategy at all.
 		bus.MessagePattern(nodeID),
 		bus.ReceiptPattern(nodeID),
+		// The output a device streams while running peer work is its own account
+		// of what happened. Reconciling must never let another machine rewrite
+		// it, or the transcript stops being evidence.
+		bus.OutputPattern(nodeID),
 		// A device's autonomy ceiling and its record of what it changed on
 		// itself are both statements only that device can make. Another machine
 		// reconciling must never be able to raise this one's level, or to drop

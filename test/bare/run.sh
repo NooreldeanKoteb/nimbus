@@ -265,6 +265,42 @@ check "boot proposes"      "/nimbus boot --act | grep -q 'not starting a session
 check "proposal recorded"  "/nimbus task show fix-boot | grep -q proposal"
 check "require_human hard" "! /nimbus system apply 'mkfs.ext4 /dev/sdb1' --rollback true"
 
+# --- Phase 5: peer execution, bounded by the allowlist of the device asked ---
+# Runs entirely offline: the bus is the state repo, so a request and its answer
+# are just files, and the simulated peer is a node id override as above.
+check "no allowlist yet"   "/nimbus autonomy | grep -q 'nothing —'"
+check "work has nothing"   "/nimbus work | grep -q 'nothing to do'"
+check "exec needs a device" "! /nimbus exec"
+check "exec unknown device" "! /nimbus exec nonexistent-device 'echo hi'"
+
+# A peer asks for something this device has never agreed to run.
+DENIED=$(NIMBUS_NODE_ID=peer-device /nimbus exec build-box 'rm -rf /tmp/nope' | sed -n 's/.*(\(.*\)).*/\1/p')
+check "dry run refuses"    "/nimbus work --dry-run | grep -q 'invariant 3'"
+check "refusal is spoken"  "/nimbus work | grep -q refused"
+check "refusal travels"    "NIMBUS_NODE_ID=peer-device /nimbus exec --follow $DENIED --timeout 0 | grep -q refused"
+check "names invariant 3"  "NIMBUS_NODE_ID=peer-device /nimbus exec --follow $DENIED --timeout 0 | grep -q 'invariant 3'"
+check "nothing was run"    "! test -e /tmp/nope"
+
+# The same request, once this device has put the command on its own list.
+check "allow a command"    "/nimbus autonomy allow echo | grep -q 'peers may now run'"
+check "list is shown"      "/nimbus autonomy | grep -q '^  echo'"
+ALLOWED=$(NIMBUS_NODE_ID=peer-device /nimbus exec build-box 'echo peer-ran-this' | sed -n 's/.*(\(.*\)).*/\1/p')
+check "peer work runs"     "/nimbus work | grep -q 'exit 0'"
+check "output streamed"    "test -s $NIMBUS_HOME/repo/bus/*/output/$ALLOWED.log"
+check "output comes back"  "NIMBUS_NODE_ID=peer-device /nimbus exec --follow $ALLOWED --timeout 0 | grep -q peer-ran-this"
+check "result comes back"  "NIMBUS_NODE_ID=peer-device /nimbus exec --follow $ALLOWED --timeout 0 | grep -q 'exit 0'"
+check "at most once"       "/nimbus work | grep -q 'nothing to do'"
+check "audit has the run"  "/nimbus audit -n 0 | grep -q 'peer.exec.done'"
+check "audit has refusal"  "/nimbus audit -n 0 | grep -q 'peer.exec.refused'"
+
+# Metacharacters are refused outright: an allowlist entry of "echo" must not be
+# a way to run everything after a semicolon.
+SMUGGLED=$(NIMBUS_NODE_ID=peer-device /nimbus exec build-box 'echo x; touch /tmp/smuggled' | sed -n 's/.*(\(.*\)).*/\1/p')
+check "no shell smuggling" "/nimbus work | grep -q refused && ! test -e /tmp/smuggled"
+
+check "deny removes it"    "/nimbus autonomy deny echo | grep -q 'no longer'"
+check "list is empty"      "/nimbus autonomy | grep -q 'nothing —'"
+
 # --- audit trail ---
 # -n 0 rather than the default tail: by this point the run has recorded enough
 # actions that the first one has scrolled off.

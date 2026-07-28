@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -31,6 +32,41 @@ func Shell(ctx context.Context, command string) (string, error) {
 	}
 	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
 	return string(out), err
+}
+
+// Stream runs a command through the platform's shell, writing its combined
+// output to w as it is produced rather than at the end, and returns the exit
+// status.
+//
+// The difference from Shell matters for peer execution: a build that takes ten
+// minutes has to be watchable from another machine while it runs, which means
+// the output has to leave this process before the command finishes.
+//
+// The exit status is returned rather than the error alone because a peer needs
+// to distinguish "ran and failed" from "never ran"; err is non-nil in both
+// cases and cannot carry that distinction on its own.
+func Stream(ctx context.Context, command string, w io.Writer) (int, error) {
+	name, args := "sh", []string{"-c", command}
+	if runtime.GOOS == "windows" {
+		name, args = "cmd", []string{"/c", command}
+	}
+
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Stdout, cmd.Stderr = w, w
+	err := cmd.Run()
+
+	var exitErr *exec.ExitError
+	switch {
+	case err == nil:
+		return 0, nil
+	case errors.As(err, &exitErr):
+		return exitErr.ExitCode(), err
+	default:
+		// The shell never started: a missing interpreter, a cancelled context.
+		// That is not an exit status the command chose, so it must not look
+		// like one.
+		return -1, err
+	}
 }
 
 // Apply journals a change, runs it, and journals the outcome.

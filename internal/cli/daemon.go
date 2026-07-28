@@ -36,6 +36,7 @@ func runDaemonRun(ctx context.Context, env *Env, args []string) error {
 	once := fs.Bool("once", false, "run a single cycle and exit")
 	noBoot := fs.Bool("no-boot", false, "do not look for a task to resume on startup")
 	act := fs.Bool("act", false, "let boot resume start a session rather than only proposing one")
+	work := fs.Bool("work", false, "run commands peers ask for, from this device's allowlist")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -65,7 +66,27 @@ func runDaemonRun(ctx context.Context, env *Env, args []string) error {
 		Once:     *once,
 		Out:      env.Out,
 		OnStart:  bootHook(env, *noBoot, *act),
+		Work:     workHook(env, *work, *act),
 	})
+}
+
+// workHook is what the daemon runs each cycle to do what peers have asked for.
+//
+// --no-sync is not optional here: the daemon's own loop owns the repo, and two
+// git operations on one worktree at the same time corrupt the index. The worker
+// writes files; the next cycle pushes them, which is also what makes a long
+// command's output visible on another machine before it finishes.
+func workHook(env *Env, enabled, act bool) func(context.Context) error {
+	if !enabled {
+		return nil
+	}
+	return func(ctx context.Context) error {
+		args := []string{"work", "--no-sync"}
+		if act {
+			args = append(args, "--act")
+		}
+		return run(ctx, env, args)
+	}
 }
 
 // bootHook is what the daemon runs once at startup to pick up work that was in
@@ -92,6 +113,7 @@ func runDaemonInstall(_ context.Context, env *Env, args []string) error {
 	fs.SetOutput(env.Err)
 	interval := fs.Duration("interval", daemon.DefaultInterval, "how often to sync")
 	act := fs.Bool("act", false, "let boot resume start a session rather than only proposing one")
+	work := fs.Bool("work", false, "run commands peers ask for, from this device's allowlist")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -106,7 +128,9 @@ func runDaemonInstall(_ context.Context, env *Env, args []string) error {
 		return err
 	}
 
-	svc, err := daemon.Install(interval.String(), *act)
+	svc, err := daemon.Install(daemon.ServiceOptions{
+		Interval: interval.String(), Act: *act, Work: *work,
+	})
 	if err != nil {
 		return err
 	}
@@ -116,6 +140,17 @@ func runDaemonInstall(_ context.Context, env *Env, args []string) error {
 		fmt.Fprintf(env.Out, "boot resume will start a session (needs %s)\n", "autonomy l3")
 	} else {
 		fmt.Fprintln(env.Out, "boot resume will write a proposal — `--act` to start the session instead")
+	}
+	if *work {
+		// Naming the allowlist here rather than only in the docs: this is the
+		// moment somebody has decided to let other machines drive this one, and
+		// the empty list is the difference between that being safe and not.
+		p := env.policy(id.ID)
+		fmt.Fprintf(env.Out, "will run peer requests — %d command(s) allowed, %s\n",
+			len(p.Exec), p.Level)
+		if len(p.Exec) == 0 {
+			fmt.Fprintln(env.Out, "  nothing is allowed yet: `nimbus autonomy allow \"<command>\"`")
+		}
 	}
 	if svc.Enable != "" {
 		// A headless SSH session has no user D-Bus, so nimbus cannot start the

@@ -432,11 +432,14 @@ is the only thing present to notice a task was in flight when the machine went
 down. A failed resume never stops the sync loop — syncing is what every other
 device depends on, resuming is this one's convenience.
 
-Scope is otherwise deliberately narrow: it syncs and it reports. It does **not**
-execute dispatched work unattended — that needs a transport that can stream
-results back (§6a). What it buys today is that a message sent from another
-device arrives without anyone typing a command, which is the difference between
-a mesh and a pair of repos.
+Since Phase 5 it can also do what peers ask, with `nimbus daemon run --work`.
+That is opt-in and separate from installing the daemon: making a machine sync
+must never be the same act as volunteering it to run other people's commands.
+What it may do is bounded by that device's own policy (§6d), never by the sender.
+
+Syncing came first on purpose. Shipping unattended execution before the autonomy
+ladder existed to bound it would have been exactly backwards, and it is why the
+work hook arrived a phase after the mesh it runs on.
 
 Sync times are jittered. Devices started by the same unit at boot would
 otherwise line up on one schedule, collide on every push, and spend their cycles
@@ -455,26 +458,91 @@ The peer surface this section originally proposed, against what shipped:
 | `peer_message` | `nimbus_send` |
 | `peer_inbox` | `nimbus_inbox` |
 | `peer_claim` | `nimbus_task_queue` + `nimbus_task_steal` (§12a) |
-| `peer_await` | Not shipped. Blocking on a git round-trip is a poll loop wearing a different name |
-| `peer_tail` | Not possible over git. Needs a real transport |
-| `peer_exec` | Allowlist is implemented and enforced (§12, invariant 3); nothing dispatches through it yet |
+| `peer_await` | `nimbus exec --wait`. Still a poll loop over git, but an honest one that says so and detaches rather than hanging |
+| `peer_tail` | `nimbus exec --follow` / `nimbus_exec_result`. Not real-time — resolution is the sync interval (§6d) |
+| `peer_exec` | `nimbus exec` + `nimbus work`, bounded by the recipient's allowlist (§12, invariant 3) |
 
-**Dispatch lifecycle.** `peer_dispatch` writes the task to the state repo, pushes,
-then notifies the target over the tailnet. Target's `nimbusd` pulls, spawns a
-headless Claude Code (`claude -p`) inside a detached tmux session, and streams
-progress back. The tmux session means the work survives `nimbusd` restarting and
-stays attachable for a human.
+**Dispatch lifecycle, proposed vs shipped.** The original plan was: push the
+task, notify over the tailnet, and have the target spawn `claude -p` inside a
+detached tmux session. What shipped drops both the tailnet and tmux. The target
+learns about the work from its next sync, and the session is an ordinary child
+process — tmux would have been a dependency the binary exists to avoid, and its
+benefit (surviving the daemon restarting) is better served by the task claim and
+progress timeline, which survive the whole machine restarting.
 
-**The cross-device debugging case.** Client on laptop, server on desktop:
+**The cross-device debugging case.** Client on laptop, server on desktop. This
+was the motivating scenario; here is how much of it works now:
 
-1. Laptop Claude opens a *debug session* — a task with `affinity = ["laptop", "desktop"]`.
-2. Both nodes join; a shared correlation id is injected into both sides' logging.
-3. Laptop reproduces; `peer_tail` streams the desktop's server logs into the laptop session in real time.
-4. Either side proposes a fix; `peer_exec` applies and restarts on the correct machine.
-5. Both write to the same `progress.jsonl`, so the transcript is unified.
+1. A task with a device affinity — **shipped** (§7).
+2. A shared correlation id injected into both sides' logging — **not shipped**.
+3. Streaming the desktop's logs into the laptop session — **shipped at sync
+   resolution** via `nimbus exec "journalctl -fu myserver" --wait`, which is
+   useful for watching a build and too slow for interleaving two live logs.
+4. Applying a fix on the correct machine — **shipped**, if the command is on
+   that machine's allowlist.
+5. One unified transcript — **shipped**: both devices append to their own
+   progress shards and a merged read reconstructs the timeline (§7).
 
-This is the feature with the least prior art and the most value. It is also why
-the mesh is a first-class component rather than a sync tool with extras.
+Step 2 is the remaining gap, and it is the one that would make two logs readable
+as a single story rather than as two streams that happen to arrive together.
+
+### 6d. Peer execution (implemented)
+
+Phase 5. Until something drained the inbox and acted on it, a dispatch was a
+note nobody read — the mesh could carry work but not do it. `nimbus work` is the
+receiving half, and it handles two kinds of request that are deliberately
+**unequal in what they grant**:
+
+| | `nimbus exec` | dispatched task |
+|---|---|---|
+| What runs | one named command | a headless Claude session |
+| Bounded by | the recipient's allowlist (invariant 3) | nothing — a session runs what it decides to |
+| Needs | L3 + the command on the list | L3 **and** `--act` |
+| Output | streamed back live | task timeline |
+
+The asymmetry is the point. Running one allowlisted command is a narrow,
+auditable grant. Starting a session is not bounded by any list, so it does not
+follow from the level alone — a device volunteers for it separately.
+
+**The allowlist belongs to the recipient.** It lives in that device's own
+`policy/<node>.json`, next to its level, and nothing a sender puts in a message
+can widen it. An allowlist the caller can influence is not an allowlist. It is
+also empty by default, so a device nobody has configured refuses everything
+rather than defaulting to something plausible.
+
+Earlier drafts wired the guard's allowlist to the *task's* `allowed_first`
+commands. That was wrong in a way worth recording: a task travels between
+machines, so the device that wrote it would have been deciding what runs here.
+
+**Refusals travel back.** A refused request gets a result with
+`exit = ExitRefused` carrying the reason, not silence. A sender that hears
+nothing cannot tell "refused" from "still running" and would keep waiting on a
+decision that was already made.
+
+**Acknowledge before running, not after.** A device that dies mid-command must
+not run it again on the next drain. At-most-once is the right guarantee for
+something with side effects: a command that never ran is visible as a missing
+result, but a package installed twice is not visible at all.
+
+**Streaming, honestly.** `peer_tail` was listed below as "not possible over
+git". That was too strong. The worker appends output to
+`bus/<node>/output/<id>.log` as the command prints, the daemon's next sync
+pushes whatever has landed, and the far device sees partial output long before
+the command finishes. The resolution is the sync interval rather than the
+keystroke — which is what a git transport can honestly offer, and is enough to
+watch a long build make progress. No second network path, no second account.
+
+Only the tail of the output rides back in the result message; the full
+transcript stays in the log. One noisy build must not bloat the bus for every
+device that syncs it.
+
+**Work runs in the background of the sync loop.** A dispatched session can take
+half an hour. A daemon that stopped syncing for its duration would look dead to
+the rest of the fleet — long enough for another device to decide the claim had
+lapsed and steal the task out from under a machine that was busy doing it. So
+the worker is a goroutine and the loop keeps syncing, which is also exactly what
+carries the streamed output out. It must not sync itself: two git operations on
+one worktree at the same time is a corrupt index.
 
 ## 7. Task model and device affinity (implemented)
 
@@ -890,7 +958,7 @@ These hold at **every** level, including L3, and no flag turns them off:
 
 1. Never force-push, and never push to a default branch.
 2. Never commit unencrypted secrets.
-3. `peer_exec` runs only allowlisted commands.
+3. A peer may only run commands on **this** device's allowlist.
 4. Every system change is journaled with a rollback command before it is applied.
 5. Destructive filesystem operations outside the working tree always require a human.
 
@@ -907,7 +975,7 @@ matters more than the wording:
 |---|---|---|
 | 1 | `autonomy.Guard.Allow` | Every push proposal passes through the guard |
 | 2 | `state.Repo.Commit` | The one path every write to the state repo takes. A check the caller has to remember is a check that gets skipped |
-| 3 | `autonomy.Guard.Allow` | Matched on the first word, and refused outright if the command contains shell metacharacters — otherwise `journalctl; rm -rf /` passes an allowlist that contains `journalctl` |
+| 3 | `autonomy.Guard.Allow`, reached from `cli.workExec` | Matched on the first word, and refused outright if the command contains shell metacharacters — otherwise `journalctl; rm -rf /` passes an allowlist that contains `journalctl`. The list comes from the recipient's `policy/<node>.json`, so nothing in the request can widen it (§6d) |
 | 4 | `system.Apply` | The record is written *and flushed* before the command runs, so a change that stops the machine coming back still leaves its own undo behind |
 | 5 | `autonomy.Guard.Allow` | Path is resolved and compared against the tree, so a `..` traversal out of it counts as outside |
 
@@ -998,13 +1066,27 @@ boot resume, propose-only by default (§10). Work-stealing queue with claims as
 leases measured against the holder's own timeline (§12a). Secret scanning that
 refuses the commit rather than warning about it.
 *Delivers: a device that can be trusted to act while nobody is watching.*
-*Remaining: unattended execution of dispatched work — the peer-exec allowlist
-exists and is enforced, but nothing yet dispatches through it, because that
-needs a transport that can stream results back (§6a).*
+*Remaining: unattended execution of dispatched work (became Phase 5).*
 
-**Phase 5 — Unattended peers.** Peer execution end to end, live output
-streaming, and a tailnet transport for the cases where git round-trips are too
-slow.
+**Phase 5 — Unattended peers. [DONE]** Peer execution end to end (§6d):
+`nimbus exec` asks, `nimbus work` answers, and the recipient's own allowlist
+decides. Output streams back through the state repo at sync resolution, so a
+long command is watchable from another machine while it runs. Daemon work hook,
+opt-in and separate from installing the daemon. Two MCP tools so Claude can
+reach a peer directly.
+*Delivers: a device that does what other devices ask it to, and refuses out loud
+when it will not.*
+*Changed: streaming shipped over git rather than needing a new transport. The
+resolution is the sync interval, not the keystroke — good enough to watch a
+build, not good enough to interleave two live logs.*
+*Dropped: tmux for dispatched sessions — a dependency the binary exists to avoid,
+whose benefit is already covered by the claim and the progress timeline.*
+*Deferred: the tailnet. Still 547 modules and a second account, and after
+shipping git-based streaming it is a latency optimization rather than a missing
+capability (§6a).*
+
+**Phase 6 — Out-of-band device.** A peer that reaches a machine which cannot run
+nimbus at all. See §15.
 
 Each phase is independently useful. Phase 1 alone solves a real daily problem.
 
@@ -1021,9 +1103,10 @@ Each phase is independently useful. Phase 1 alone solves a real daily problem.
    compromise), or require pasting it once per device (safer, breaks the
    one-login promise)? A middle path: derive by default, allow opt-in to a
    separate key for high-value secrets.
-3. **Headless dispatch shape.** `claude -p` for one-shot, or a long-lived session
-   driven over the MCP channel? The latter is better for interactive debugging,
-   the former simpler.
+3. **Resolved: headless dispatch is `claude -p`.** One-shot, as a child process,
+   shared by boot resume and peer dispatch so the two cannot drift (§6d). The
+   long-lived alternative is better for interactive debugging and remains
+   available later; it was not worth building before anything dispatched at all.
 4. **Journal compaction.** Append-only grows forever. Compact on a schedule, or
    only when a threshold is hit?
 5. **Tailnet account.** `tsnet` needs no install, but it still needs a Tailscale
@@ -1033,3 +1116,59 @@ Each phase is independently useful. Phase 1 alone solves a real daily problem.
    repo (best UX, ties the mesh to your Tailscale org), or write a custom
    WireGuard-over-`wireguard-go` transport with a self-hosted rendezvous server
    (no third-party account, meaningfully more work).
+
+## 15. Note: out-of-band device (Phase 6, not designed yet)
+
+**The idea.** A small hardware peer that plugs into another machine's **HDMI
+out** and a **USB port**, captures the video, and presents itself as a keyboard
+and mouse. It joins the fleet like any other device, so a machine that cannot
+boot is still reachable — you can see its screen and type into it from a session
+on a different machine, or from a phone.
+
+**Why it belongs in nimbus rather than beside it.** Every capability nimbus has
+today assumes the target device can run nimbus. That assumption fails at exactly
+the moment the tooling matters most: a kernel panic, a bad initramfs, a GRUB
+prompt, a display manager that never comes up, a BIOS screen. Boot resume (§10)
+handles "the machine restarted and came back". It has nothing to say about "the
+machine restarted and did not come back", which is the failure that actually
+costs an evening.
+
+The mesh already has the right shape for this. Such a device is a peer with an
+unusual capability set — no CPU to lend, but `kvm:video` and `kvm:hid` — and
+capability-checked routing (§7) already means work only goes where it can run.
+Video and input are `peer_exec` with a different payload.
+
+**What it would need, roughly:**
+
+- Hardware: an SBC with an HDMI *capture* input (not output) and a USB port able
+  to run in device mode, so it can enumerate as a HID keyboard/mouse. Off-the-shelf
+  designs exist; PiKVM is the reference point.
+- A capability profile (§9) that publishes `kvm:video`, `kvm:hid`, and which
+  machine it is physically wired to — the one piece of state no autodetection can
+  supply.
+- A transport for frames. This is the first thing nimbus does that git genuinely
+  cannot carry: §6d streams text at sync resolution, and video is neither text
+  nor tolerant of a one-minute lag. **This is the requirement that would finally
+  justify the tailnet** (§14 q5), which has been correctly deferred three times
+  for lack of exactly this.
+- Its own place on the ladder. Sending keystrokes to a machine is not covered by
+  any existing rung: it is unbounded by construction, since a keyboard can type
+  anything and no allowlist can inspect intent. Invariant 3 does not stretch to
+  cover it, so this needs either a new invariant or an explicit L4.
+
+**Open questions:**
+
+1. Does the KVM device run nimbus itself, or is it a dumb peripheral driven by a
+   nearby device that does? The former makes it a real fleet member and puts a Go
+   binary on constrained hardware; the latter is simpler but means the thing you
+   reach for when a machine is down depends on a second machine being up.
+2. Frames to a person, or frames to Claude? Screenshot-to-model is the
+   interesting case — "read this panic and tell me what to type" — and it is a
+   very different bandwidth and latency budget from a human watching a console.
+3. Is the physical wiring published as a capability, or discovered? Nothing in
+   software can tell which machine a cable goes to, so this may be the first
+   piece of fleet state a person must simply assert.
+
+Deliberately not designed further here. It is a hardware project with a software
+surface, and the software surface only makes sense once the transport question
+(§14 q5) is answered.

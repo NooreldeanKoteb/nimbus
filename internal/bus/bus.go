@@ -11,10 +11,12 @@
 // The layout keeps every file owned by exactly one device, which is what makes
 // it conflict-free under the reconcile in §4a:
 //
-//	bus/<from>/messages/<id>.json   written only by the sender
-//	bus/<from>/receipts/<id>.json   written only by the receiver
+//	bus/<node>/messages/<id>.json   messages this device sent
+//	bus/<node>/receipts/<id>.json   messages this device acknowledged
+//	bus/<node>/output/<id>.log      what this device streamed while working
 //
-// A sender never writes into the recipient's directory, and a recipient never
+// Every path under bus/<node>/ is written by that node and nobody else. A
+// sender never writes into the recipient's directory, and a recipient never
 // edits a message. Delivery state is *derived* from the presence of a receipt
 // rather than stored as a mutable field, so two devices can never disagree
 // about it.
@@ -41,6 +43,16 @@ const (
 	KindDispatch = "dispatch"
 	// KindReply answers an earlier message.
 	KindReply = "reply"
+	// KindExec asks the recipient to run one command. This is the only kind
+	// that makes something happen on the far device with nobody sitting at it,
+	// which is why it is bounded twice: by the ladder (peer.exec needs L3) and
+	// by that device's own allowlist, which no sender can influence
+	// (DESIGN.md §12, invariant 3).
+	KindExec = "exec"
+	// KindResult carries the outcome of a KindExec back to whoever asked,
+	// threaded through ReplyTo. A refusal comes back as a result too: a sender
+	// that hears nothing cannot tell "refused" from "still running".
+	KindResult = "result"
 )
 
 // ErrNotFound is returned when no message has the given id.
@@ -57,9 +69,21 @@ type Message struct {
 	// context needed to act on it rather than just a sentence.
 	Task string `json:"task,omitempty"`
 	// ReplyTo threads an answer back to its question.
-	ReplyTo string    `json:"reply_to,omitempty"`
-	Sent    time.Time `json:"sent"`
+	ReplyTo string `json:"reply_to,omitempty"`
+	// Command is what a KindExec message asks the recipient to run. Kept in its
+	// own field rather than in Text so the recipient never has to parse a
+	// sentence to find the thing it is about to execute.
+	Command string `json:"command,omitempty"`
+	// Exit is the status a KindResult reports. ExitRefused means the command
+	// never ran at all, which is a different outcome to a command that ran and
+	// failed, and the sender needs to be able to tell them apart.
+	Exit int       `json:"exit,omitempty"`
+	Sent time.Time `json:"sent"`
 }
+
+// ExitRefused marks a result for a command that was never executed — refused by
+// the allowlist, by the ladder, or because the device could not start it.
+const ExitRefused = -1
 
 // Receipt records that a device has seen a message. Written by the receiver
 // into its own directory, which is why acknowledging never conflicts with the
@@ -114,8 +138,11 @@ func Send(repoPath string, m *Message) (*Message, error) {
 	if m.To == m.From {
 		return nil, errors.New("cannot send a message to this device")
 	}
-	if strings.TrimSpace(m.Text) == "" && m.Task == "" {
-		return nil, errors.New("a message needs text or a task")
+	if strings.TrimSpace(m.Text) == "" && m.Task == "" && m.Command == "" {
+		return nil, errors.New("a message needs text, a task, or a command")
+	}
+	if m.Kind == KindExec && strings.TrimSpace(m.Command) == "" {
+		return nil, errors.New("an exec message needs a command to run")
 	}
 
 	if m.ID == "" {
@@ -261,6 +288,96 @@ func Load(repoPath, id string) (*Message, error) {
 		return nil, fmt.Errorf("parse message %s: %w", id, err)
 	}
 	return &m, nil
+}
+
+// OutputPattern matches the output streams a device owns, for the sync layer.
+func OutputPattern(nodeID string) string {
+	return filepath.Join("bus", nodeID, "output", "*.log")
+}
+
+// OutputFile is where a device streams what a command it accepted is printing.
+func OutputFile(repoPath, nodeID, id string) string {
+	return filepath.Join(repoPath, "bus", nodeID, "output", id+".log")
+}
+
+// validID rejects anything that would escape the bus directory. Message ids
+// come from NewID, but a person types one at `nimbus exec --wait <id>`, and a
+// path built from unvalidated input is a path that can be aimed anywhere.
+func validID(id string) bool {
+	if id == "" || len(id) > 64 {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// AppendOutput adds a chunk to a message's output stream.
+//
+// This is what "live" means on a git transport: the worker appends as the
+// command prints, the daemon's next sync pushes whatever has accumulated, and
+// the far device sees partial output long before the command finishes. The
+// granularity is the sync interval rather than the keystroke, which is honest
+// about what git can do and needs no second network path to achieve it.
+func AppendOutput(repoPath, nodeID, id string, chunk []byte) error {
+	if !validID(id) {
+		return fmt.Errorf("%q is not a message id", id)
+	}
+	path := OutputFile(repoPath, nodeID, id)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("stream output: %w", err)
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("stream output: %w", err)
+	}
+	defer f.Close()
+	if _, err := f.Write(chunk); err != nil {
+		return fmt.Errorf("stream output: %w", err)
+	}
+	return nil
+}
+
+// Output reads whatever has been streamed for a message so far.
+//
+// Missing is not an error: a command that has been accepted but has not yet
+// printed anything is the normal state for the first few seconds, and it must
+// read as empty rather than as a failure.
+func Output(repoPath, id string) (string, error) {
+	if !validID(id) {
+		return "", fmt.Errorf("%q is not a message id", id)
+	}
+	matches, err := filepath.Glob(filepath.Join(repoPath, "bus", "*", "output", id+".log"))
+	if err != nil || len(matches) == 0 {
+		return "", err
+	}
+	data, err := os.ReadFile(matches[0])
+	if err != nil {
+		return "", nil
+	}
+	return string(data), nil
+}
+
+// Answer finds the result sent in reply to a message, or nil if none has
+// arrived. Results are ordinary messages, so this is a filter over the bus
+// rather than a second delivery mechanism to keep in step.
+func Answer(repoPath, id string) (*Message, error) {
+	all, err := All(repoPath)
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range all {
+		if e.Message.ReplyTo == id && e.Message.Kind == KindResult {
+			return e.Message, nil
+		}
+	}
+	return nil, nil
 }
 
 // Ack records that this device has seen a message.

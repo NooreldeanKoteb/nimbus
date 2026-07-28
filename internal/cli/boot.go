@@ -2,15 +2,14 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
-	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/nkoteb/nimbus/internal/autonomy"
 	"github.com/nkoteb/nimbus/internal/device"
-	"github.com/nkoteb/nimbus/internal/install"
 	"github.com/nkoteb/nimbus/internal/system"
 	"github.com/nkoteb/nimbus/internal/task"
 )
@@ -171,45 +170,17 @@ func proposeBoot(ctx context.Context, env *Env, nodeID string, t *task.Task, bri
 }
 
 // actOnBoot starts the session unattended. Only reached at L3.
+//
+// The session itself is runSession, shared with peer dispatch: an unattended
+// session is the same event whether the machine restarted or another device
+// asked, and the two must leave the same trail behind.
 func actOnBoot(ctx context.Context, env *Env, nodeID string, t *task.Task, brief string) error {
-	bin := install.ClaudeCodePath()
-	if bin == "" {
+	err := runSession(ctx, env, nodeID, t, brief, bootTimeout)
+	if errors.Is(err, errNoClaude) {
 		fmt.Fprintln(env.Out, "claude is not installed on this device; leaving a proposal instead")
 		return proposeBoot(ctx, env, nodeID, t, brief, autonomy.Decision{Allowed: true})
 	}
-
-	binding, err := task.BindSession(env.Paths.Repo, t.ID, nodeID, "")
-	if err != nil {
-		return nil
-	}
-	_ = task.Record(env.Paths.Repo, t.ID, nodeID, task.KindBoot,
-		"resumed unattended after restart (session "+binding.SessionID+")")
-	if repo, rerr := env.stateRepo(); rerr == nil {
-		// Pushed before the session starts: if it wedges, the fleet still knows
-		// this device took the work.
-		autoSync(ctx, env, repo, nodeID, "nimbus: boot resume "+t.ID)
-	}
-
-	runCtx, cancel := context.WithTimeout(ctx, bootTimeout)
-	defer cancel()
-
-	// Headless, because there is no terminal at boot. The brief goes in as the
-	// prompt rather than through the SessionStart hook, so this works on a
-	// device where the hook was never installed.
-	cmd := exec.CommandContext(runCtx, bin, "-p", brief)
-	cmd.Stdout, cmd.Stderr = env.Out, env.Err
-	runErr := cmd.Run()
-
-	kind, detail := task.KindNote, "unattended boot session finished"
-	if runErr != nil {
-		kind, detail = task.KindBlocked, "unattended boot session failed: "+runErr.Error()
-	}
-	_ = task.Record(env.Paths.Repo, t.ID, nodeID, kind, detail)
-	if log, lerr := env.auditLog(nodeID); lerr == nil {
-		log.Record("local", "boot.resume", t.ID, detail, runErr)
-	}
-	if repo, rerr := env.stateRepo(); rerr == nil {
-		autoSync(ctx, env, repo, nodeID, "nimbus: boot session done for "+t.ID)
-	}
+	// Boot must never exit non-zero: it runs from a service unit, where a
+	// failure is a red unit nobody reads. The failure is on the task timeline.
 	return nil
 }

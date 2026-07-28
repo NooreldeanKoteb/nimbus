@@ -246,3 +246,124 @@ func TestReplyThreading(t *testing.T) {
 		t.Errorf("reply did not reach the original sender: %v", inbox)
 	}
 }
+
+// An exec message carries the command in its own field. Text is for people;
+// putting the command there too would mean a recipient parsing a sentence to
+// find the thing it is about to run.
+func TestAnExecMessageNeedsACommand(t *testing.T) {
+	repo := t.TempDir()
+
+	if _, err := Send(repo, &Message{
+		From: "laptop", To: "desktop", Kind: KindExec, Text: "please run something",
+	}); err == nil {
+		t.Fatal("an exec message with no command was accepted")
+	}
+
+	m, err := Send(repo, &Message{
+		From: "laptop", To: "desktop", Kind: KindExec, Command: "systemctl status nimbus",
+	})
+	if err != nil {
+		t.Fatalf("an exec message with a command but no text was rejected: %v", err)
+	}
+
+	inbox, _ := Inbox(repo, "desktop", false)
+	if len(inbox) != 1 || inbox[0].Message.Command != "systemctl status nimbus" {
+		t.Errorf("the command did not survive the round trip: %+v", inbox)
+	}
+	if inbox[0].Message.ID != m.ID {
+		t.Errorf("id changed in transit")
+	}
+}
+
+// The streaming half of peer execution: output has to be readable before the
+// command that is producing it has finished.
+func TestOutputIsReadableWhileItIsStillBeingWritten(t *testing.T) {
+	repo := t.TempDir()
+	m := send(t, repo, "laptop", "desktop", "run the build")
+
+	if out, err := Output(repo, m.ID); err != nil || out != "" {
+		t.Errorf("output before anything ran = %q, %v; want empty and no error", out, err)
+	}
+
+	if err := AppendOutput(repo, "desktop", m.ID, []byte("step 1\n")); err != nil {
+		t.Fatal(err)
+	}
+	partial, err := Output(repo, m.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if partial != "step 1\n" {
+		t.Errorf("partial output = %q, want the first chunk", partial)
+	}
+
+	if err := AppendOutput(repo, "desktop", m.ID, []byte("step 2\n")); err != nil {
+		t.Fatal(err)
+	}
+	full, _ := Output(repo, m.ID)
+	if full != "step 1\nstep 2\n" {
+		t.Errorf("output = %q, want both chunks in order", full)
+	}
+}
+
+// Message ids come from NewID, but a person types one at `nimbus exec --follow`.
+// A path built from unvalidated input is a path that can be aimed anywhere.
+func TestOutputPathsCannotBeAimedOutsideTheRepo(t *testing.T) {
+	repo := t.TempDir()
+
+	for _, id := range []string{"../../etc/passwd", "a/b", "", strings.Repeat("x", 65), "a;b"} {
+		if err := AppendOutput(repo, "desktop", id, []byte("x")); err == nil {
+			t.Errorf("AppendOutput accepted %q as a message id", id)
+		}
+		if _, err := Output(repo, id); err == nil {
+			t.Errorf("Output accepted %q as a message id", id)
+		}
+	}
+}
+
+// A result is an ordinary message, found by threading rather than by a second
+// delivery mechanism that could fall out of step with the first.
+func TestAnswerFindsTheResultForARequest(t *testing.T) {
+	repo := t.TempDir()
+	request, err := Send(repo, &Message{
+		From: "laptop", To: "desktop", Kind: KindExec, Command: "uname -a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	answer, err := Answer(repo, request.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != nil {
+		t.Fatalf("a result appeared before anything ran: %+v", answer)
+	}
+
+	if _, err := Send(repo, &Message{
+		From: "desktop", To: "laptop", Kind: KindResult,
+		ReplyTo: request.ID, Exit: 0, Text: "Linux",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	answer, err = Answer(repo, request.ID)
+	if err != nil || answer == nil {
+		t.Fatalf("the result was not threaded back: %v %v", answer, err)
+	}
+	if answer.Exit != 0 || answer.Text != "Linux" {
+		t.Errorf("result = %+v, want exit 0 and the output", answer)
+	}
+
+	// A plain reply is not a result: an exec is finished by a status, and a
+	// person answering the thread must not look like the command returning.
+	if _, err := Send(repo, &Message{
+		From: "desktop", To: "laptop", Kind: KindReply,
+		ReplyTo: request.ID, Text: "looks fine to me",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	answer, _ = Answer(repo, request.ID)
+	if answer == nil || answer.Kind != KindResult {
+		t.Errorf("Answer returned a %q, want only a result", answer.Kind)
+	}
+}

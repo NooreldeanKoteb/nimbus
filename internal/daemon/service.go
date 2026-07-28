@@ -22,6 +22,19 @@ type Service struct {
 	Enable string
 }
 
+// ServiceOptions is what the installed unit will do. A struct rather than a run
+// of booleans, because `Install("1m", true, false)` at the call site says
+// nothing about which capability was just granted to a machine.
+type ServiceOptions struct {
+	Interval string
+	// Act lets boot resume start a session instead of writing a proposal.
+	Act bool
+	// Work lets the daemon run what peers ask for, bounded by this device's
+	// allowlist. Off by default: installing a syncing daemon must never be the
+	// same act as volunteering the machine to run other people's commands.
+	Work bool
+}
+
 // Install writes a per-user service unit that runs `nimbus daemon run`.
 //
 // Per-user, never system-wide: the daemon reads the user's credentials and
@@ -33,7 +46,7 @@ type Service struct {
 // manager starts at login, so it is the only thing present to notice that a
 // task was in flight when the machine went down. act promotes that from writing
 // a proposal to starting the session, and is refused anyway below L3.
-func Install(interval string, act bool) (*Service, error) {
+func Install(opts ServiceOptions) (*Service, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return nil, fmt.Errorf("locate nimbus: %w", err)
@@ -43,9 +56,12 @@ func Install(interval string, act bool) (*Service, error) {
 		return nil, fmt.Errorf("resolve nimbus path: %w", err)
 	}
 
-	args := "daemon run --interval " + interval
-	if act {
+	args := "daemon run --interval " + opts.Interval
+	if opts.Act {
 		args += " --act"
+	}
+	if opts.Work {
+		args += " --work"
 	}
 
 	switch runtime.GOOS {

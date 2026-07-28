@@ -1,11 +1,18 @@
-// Package daemon keeps a device's state repo fresh in the background.
+// Package daemon keeps a device's state repo fresh in the background, and —
+// once the invariants existed to make it safe — runs the work other devices ask
+// it for.
 //
-// Scope is deliberately narrow: it syncs and it reports. It does **not** run
-// dispatched work unattended — that is the autonomy ladder in DESIGN.md §12,
-// and shipping execution before the invariants exist would be exactly backwards.
-// What it buys today is that a message sent from another device arrives without
-// anyone remembering to type a command, which is the difference between a mesh
-// and a pair of repos.
+// Syncing came first on purpose: shipping unattended execution before the
+// autonomy ladder (DESIGN.md §12) would have been exactly backwards. The Work
+// hook is opt-in for the same reason, and everything it may do is decided by
+// this device's own policy rather than by whoever sent the request.
+//
+// Work runs in the background rather than inline. A dispatched session can take
+// half an hour, and a daemon that stopped syncing for its duration would look
+// dead to the rest of the fleet — long enough for another device to decide the
+// claim had lapsed and steal the task out from under a machine that was busy
+// doing it. Syncing through the run is also what makes streamed output arrive
+// elsewhere while the command is still going.
 package daemon
 
 import (
@@ -13,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"sync/atomic"
 	"time"
 
 	"github.com/nkoteb/nimbus/internal/bus"
@@ -49,6 +57,15 @@ type Options struct {
 	// still this device's to resume is a question only the remote can answer —
 	// another machine may have taken it while this one was off.
 	OnStart func(context.Context) error
+	// Work drains whatever peers have asked this device to do. Nil means the
+	// daemon only syncs, which is the default: a device runs other people's
+	// work because somebody turned that on, never because it was installed.
+	//
+	// It must not sync itself — this loop owns the repo, and a second git
+	// operation on the same worktree at the same time is a corrupt index.
+	// Writing files and letting the next cycle push them is both simpler and
+	// what makes output stream out during a long run.
+	Work func(context.Context) error
 }
 
 // Result reports what one cycle observed.
@@ -75,11 +92,18 @@ func Run(ctx context.Context, auth AuthFunc, opts Options) error {
 		}
 	}
 
+	// busy is what keeps one worker at a time. Without it a cycle every minute
+	// would start a second worker on the same inbox before the first had
+	// acknowledged anything, and the same command would run twice.
+	var busy atomic.Bool
+
 	first := true
 	for {
 		result := cycle(ctx, auth, opts, seen)
 		report(opts.Out, result)
 
+		// Boot resume goes first on the cycle it runs: work this device left in
+		// flight has a stronger claim on it than work somebody else is offering.
 		if first && opts.OnStart != nil {
 			first = false
 			// A failed boot resume must not stop the daemon syncing. Syncing is
@@ -87,6 +111,16 @@ func Run(ctx context.Context, auth AuthFunc, opts Options) error {
 			// convenience.
 			if err := opts.OnStart(ctx); err != nil && opts.Out != nil {
 				fmt.Fprintf(opts.Out, "%s boot resume: %v\n", time.Now().Format("15:04:05"), err)
+			}
+		}
+
+		if opts.Work != nil && busy.CompareAndSwap(false, true) {
+			if opts.Once {
+				// A single cycle has no later sync to carry the results, and a
+				// goroutine outliving this function would be killed mid-command.
+				drain(ctx, opts, &busy)
+			} else {
+				go drain(ctx, opts, &busy)
 			}
 		}
 
@@ -99,6 +133,15 @@ func Run(ctx context.Context, auth AuthFunc, opts Options) error {
 			return nil
 		case <-time.After(withJitter(opts.Interval)):
 		}
+	}
+}
+
+// drain runs the work hook and releases the busy flag whatever happens, so one
+// panicking or erroring run cannot wedge the device into never working again.
+func drain(ctx context.Context, opts Options, busy *atomic.Bool) {
+	defer busy.Store(false)
+	if err := opts.Work(ctx); err != nil && opts.Out != nil {
+		fmt.Fprintf(opts.Out, "%s work: %v\n", time.Now().Format("15:04:05"), err)
 	}
 }
 

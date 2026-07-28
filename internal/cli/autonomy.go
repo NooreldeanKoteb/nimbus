@@ -23,20 +23,31 @@ func (e *Env) policy(nodeID string) *autonomy.Policy {
 // is present is a property of how nimbus was invoked — a terminal, an MCP tool
 // call from Claude, or a systemd unit at boot — and not something the command
 // being run gets to assert about itself.
-func (e *Env) guard(nodeID string, t *task.Task) autonomy.Guard {
-	g := autonomy.Guard{
-		Level:    e.policy(nodeID).Level,
-		Attended: e.Attended,
-		WorkTree: e.Paths.Repo,
+// The task argument is accepted for callers that have one, but the peer-exec
+// allowlist comes from this device's policy and never from the task: a task
+// travels between machines, so letting it carry its own allowlist would let the
+// device that wrote it decide what runs here.
+func (e *Env) guard(nodeID string, _ *task.Task) autonomy.Guard {
+	p := e.policy(nodeID)
+	return autonomy.Guard{
+		Level:           p.Level,
+		Attended:        e.Attended,
+		WorkTree:        e.Paths.Repo,
+		AllowedCommands: p.Exec,
 	}
-	if t != nil {
-		g.AllowedCommands = t.Contract().AllowedFirst
-	}
-	return g
 }
 
 func runAutonomy(ctx context.Context, env *Env, args []string) error {
 	wanted, args := takeArg(args)
+
+	// allow/deny edit the peer-exec allowlist rather than the level. They live
+	// here because they are the same decision seen from a different angle: the
+	// level says how far this device goes on its own, the allowlist says how
+	// far another device may push it.
+	switch wanted {
+	case "allow", "deny":
+		return runAllowlist(ctx, env, wanted, args)
+	}
 
 	fs := flag.NewFlagSet("autonomy", flag.ContinueOnError)
 	fs.SetOutput(env.Err)
@@ -86,6 +97,61 @@ func runAutonomy(ctx context.Context, env *Env, args []string) error {
 	return nil
 }
 
+// runAllowlist adds or removes a command peers may run on this device.
+func runAllowlist(ctx context.Context, env *Env, verb string, args []string) error {
+	command := strings.TrimSpace(strings.Join(args, " "))
+	if command == "" {
+		return fmt.Errorf("usage: nimbus autonomy %s \"<command>\"", verb)
+	}
+
+	id, err := env.identity()
+	if err != nil {
+		return err
+	}
+	repo, err := env.stateRepo()
+	if err != nil {
+		return err
+	}
+
+	p := env.policy(id.ID)
+	changed := p.Allow(command)
+	if verb == "deny" {
+		changed = p.Deny(command)
+	}
+	if !changed {
+		fmt.Fprintf(env.Out, "no change: %q is %son the allowlist\n", command, notPrefix(verb))
+		return nil
+	}
+	if err := p.Save(env.Paths.Repo); err != nil {
+		return err
+	}
+
+	if verb == "allow" {
+		fmt.Fprintf(env.Out, "peers may now run %q on %s\n", command, id.Label())
+		if p.Level < autonomy.L3 {
+			// Being on the list is necessary but not sufficient, and a person who
+			// stops at "allow" will otherwise wonder why nothing runs.
+			fmt.Fprintf(env.Out, "note: peer execution also needs %s — this device is at %s\n",
+				autonomy.L3, p.Level)
+		}
+	} else {
+		fmt.Fprintf(env.Out, "peers may no longer run %q on %s\n", command, id.Label())
+	}
+
+	if log, lerr := env.auditLog(id.ID); lerr == nil {
+		log.Record("local", "autonomy."+verb, command, "peer-exec allowlist", nil)
+	}
+	autoSync(ctx, env, repo, id.ID, fmt.Sprintf("nimbus: %s %q on %s", verb, command, id.ID))
+	return nil
+}
+
+func notPrefix(verb string) string {
+	if verb == "allow" {
+		return "already "
+	}
+	return "not "
+}
+
 func showAutonomy(env *Env, nodeID string) error {
 	p := env.policy(nodeID)
 
@@ -107,6 +173,15 @@ func showAutonomy(env *Env, nodeID string) error {
 		}
 		fmt.Fprintf(env.Out, "%s %s  %s\n", marker, l, l.Describe())
 	}
+	fmt.Fprintln(env.Out, "\npeers may run")
+	if len(p.Exec) == 0 {
+		fmt.Fprintln(env.Out, "  (nothing — `nimbus autonomy allow \"systemctl status nimbus\"`)")
+	} else {
+		for _, c := range p.Exec {
+			fmt.Fprintf(env.Out, "  %s\n", c)
+		}
+	}
+
 	printInvariants(env)
 	fmt.Fprintln(env.Out, "\nchange it with `nimbus autonomy l2`")
 	return nil

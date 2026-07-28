@@ -341,6 +341,44 @@ func tools(env *Env) []mcp.Tool {
 			}
 			return invoke(ctx, env, "task", "steal", taskID)
 		},
+	}, {
+		Name: "nimbus_exec",
+		Description: "Ask another device to run one shell command and report back. The command " +
+			"runs only if that device has put it on its own allowlist and is at autonomy L3, " +
+			"so a refusal is that machine's decision and not an error to work around. Returns " +
+			"immediately with a request id — poll nimbus_exec_result for the output.",
+		InputSchema: mcp.ObjectSchema(map[string]mcp.Property{
+			"device":  {Type: "string", Description: "Device alias, e.g. \"kali-thinkpad\""},
+			"command": {Type: "string", Description: "The shell command to run there"},
+		}, "device", "command"),
+		Call: func(ctx context.Context, args map[string]any) (string, error) {
+			target, err := mcp.RequireArg(args, "device")
+			if err != nil {
+				return "", err
+			}
+			command, err := mcp.RequireArg(args, "command")
+			if err != nil {
+				return "", err
+			}
+			return invoke(ctx, env, "exec", target, command)
+		},
+	}, {
+		Name: "nimbus_exec_result",
+		Description: "Show whatever a device has produced so far for a nimbus_exec request, " +
+			"and its exit status once it has finished. Output arrives as the far device syncs, " +
+			"so calling this again a minute later will usually show more.",
+		InputSchema: mcp.ObjectSchema(map[string]mcp.Property{
+			"id": {Type: "string", Description: "Request id returned by nimbus_exec"},
+		}, "id"),
+		Call: func(ctx context.Context, args map[string]any) (string, error) {
+			id, err := mcp.RequireArg(args, "id")
+			if err != nil {
+				return "", err
+			}
+			// Zero timeout: report and return. A tool call that blocks until a
+			// remote build finishes is a session that has stopped responding.
+			return invoke(ctx, env, "exec", "--follow", id, "--timeout", "0")
+		},
 	}}
 }
 

@@ -51,6 +51,11 @@ it here and prints everything the last device left behind.
 off a task, take work whose owner has gone quiet. Unread mail shows up at the
 start of the next Claude session automatically.
 
+**Peers that act.** `nimbus exec studio "systemctl status nimbus"` runs there and
+streams the output back here — but only if that machine put the command on its
+own allowlist. A device decides for itself what it will do for others, and says
+so when the answer is no.
+
 **Situational awareness.** A `SessionStart` hook injects what OS, hardware, and
 tooling this machine has, what task is in flight, and what the previous device
 said — so Claude stops guessing which platform it is on.
@@ -169,6 +174,40 @@ A task can declare what a device must have — `--needs gpu:nvidia`,
 `--needs tool:docker`, `--needs display`. Dispatching to a machine that does not
 meet them is refused rather than accepted and then stalled.
 
+### Have another device actually run it
+
+Messages and dispatches wait for someone to read them. `nimbus exec` does not —
+the far device runs the command itself and the output streams back.
+
+On the machine that will do the work, once:
+
+```sh
+nimbus autonomy l3                        # peer execution needs the top rung
+nimbus autonomy allow "systemctl status nimbus"
+nimbus autonomy allow "journalctl -u nimbus"
+nimbus daemon install --work              # answer requests without anyone typing
+```
+
+From anywhere else:
+
+```sh
+nimbus exec studio "systemctl status nimbus" --wait
+nimbus exec studio "journalctl -u nimbus -n 200"   # returns an id
+nimbus exec --follow 20260728T054212-96ff56b6      # re-attach any time
+```
+
+**The allowlist belongs to the machine being asked.** It lives in that device's
+own policy file, it is empty until someone fills it in, and nothing in a request
+can widen it. A refusal comes back as a result with the reason, so you are never
+left wondering whether a command is still running or was never going to.
+
+To let a peer start a whole Claude session rather than one named command — which
+no allowlist bounds — that machine needs `--act` on top of L3:
+
+```sh
+nimbus daemon install --work --act
+```
+
 ### Pick up work whose owner went quiet
 
 A claim is a lease, not a lock. If a device goes offline holding a task, the
@@ -251,15 +290,18 @@ requires L3.
 |---|---|
 | `nimbus send <device> "..."` | Message another device by name |
 | `nimbus dispatch <device> <task>` | Release the claim here, ask them there |
+| `nimbus exec <device> "<cmd>"` | Ask a device to run a command; `--wait` streams it back |
+| `nimbus work [--act]` | Do what peers have asked this device for |
 | `nimbus inbox` / `outbox` / `ack` | Read mail, see delivery, answer |
 | `nimbus mcp` | Serve the MCP tools on stdio (registered by `init`) |
-| `nimbus daemon run\|install\|status\|uninstall` | Keep this device synced in the background |
+| `nimbus daemon run\|install\|status\|uninstall` | Keep this device synced, and `--work` to answer peers |
 
 ### Safety
 
 | Command | |
 |---|---|
 | `nimbus autonomy [level]` | Show or set what may happen unattended |
+| `nimbus autonomy allow\|deny "<cmd>"` | What peers may run on *this* device |
 | `nimbus system apply\|list\|show\|rollback` | OS changes, journaled with their undo |
 | `nimbus audit [--verify]` | Hash-chained log of everything nimbus did |
 | `nimbus secrets keygen\|encrypt\|decrypt` | age-encrypted values, keys never in git |
@@ -276,6 +318,7 @@ nimbus_inbox            nimbus_ack              nimbus_dispatch
 nimbus_task_note        nimbus_handoff          nimbus_task_queue
 nimbus_task_steal       nimbus_memory_add       nimbus_memory_search
 nimbus_system_apply     nimbus_system_history   nimbus_system_rollback
+nimbus_exec             nimbus_exec_result
 ```
 
 They are thin shims over the same commands a person runs, sharing one dispatch
@@ -302,7 +345,8 @@ there is no flag that lifts them:
 1. Never force-push, and never push to a default branch.
 2. Never commit unencrypted secrets. Enforced at the commit itself, so no caller
    can skip it.
-3. Peer-dispatched commands run only from this device's allowlist.
+3. A peer may only run commands on **this** device's allowlist — set here, empty
+   by default, and not widenable by whoever is asking.
 4. Every system change is journaled with its rollback *before* it is applied.
 5. Destructive filesystem operations outside the working tree require a human.
 
@@ -386,7 +430,7 @@ correct design rather than a fallback.
 
 ## Status
 
-Nimbus is usable today for everything through Phase 4. Each phase below lists
+Nimbus is usable today for everything through Phase 5. Each phase below lists
 what shipped and what is deliberately still open.
 
 ### Phase 0 — The binary ✅
@@ -422,8 +466,8 @@ modules and needs a Tailscale account, which contradicts the promise that
 logging into git is enough. A tailnet may return later as a latency
 optimization behind the same interface.
 
-*Open:* `peer_tail` — streaming a peer's output live — is not possible over git
-and needs a real transport.
+*Open:* nothing further. Streaming a peer's output arrived in Phase 5, over git
+after all — at sync resolution rather than in real time.
 
 ### Phase 4 — Autonomy ✅
 
@@ -433,21 +477,49 @@ resume in propose-only mode; the work-stealing queue with claims as leases; and
 secret scanning that refuses the commit rather than warning about it.
 *Delivers: a device that can be trusted to act while you are not watching.*
 
-*Open:* unattended execution of *dispatched* work — a peer running a task end to
-end with nobody present — is the next step, and needs the peer-exec allowlist
-wired to a transport that can stream results back.
+*Open:* nothing further. Unattended execution of dispatched work became Phase 5.
 
-### Phase 5 — Next
+### Phase 5 — Unattended peers ✅
 
-Unattended peer execution, live output streaming, and a tailnet transport for
-the cases where git round-trips are too slow.
+`nimbus exec` asks another device to run a command; `nimbus work` is the half
+that answers, bounded by that device's own allowlist. Output streams back
+through the state repo, so a long command is watchable from elsewhere while it
+runs. `nimbus daemon run --work` does it without anyone typing. Dispatched
+Claude sessions need `--act` on top of L3, because no allowlist bounds a
+session.
+*Delivers: a device that does what other devices ask, and refuses out loud when
+it will not.*
+
+*Changed:* streaming shipped over git rather than needing a new transport. The
+resolution is the sync interval, not the keystroke — enough to watch a build,
+not enough to interleave two live logs.
+
+*Open:* the tailnet is still deferred. It is now a latency optimization rather
+than a missing capability, and the first thing that would genuinely require it
+is video (below).
+
+### Phase 6 — Out-of-band device (note only)
+
+A small hardware peer that plugs into another machine's HDMI out and a USB port,
+captures the video, and presents itself as a keyboard and mouse — so a machine
+that will not boot is still reachable from the fleet. Everything nimbus does
+today assumes the target can run nimbus, and that assumption fails exactly when
+it matters: a kernel panic, a bad initramfs, a GRUB prompt, a display manager
+that never comes up.
+
+It fits the mesh cleanly — a peer with `kvm:video` and `kvm:hid` capabilities,
+routed to like any other. Two things are genuinely new: video cannot ride on
+git, so this is the requirement that would finally justify a tailnet; and
+sending keystrokes is unbounded by construction, since no allowlist can inspect
+what a keyboard is about to type. Sketched in
+[docs/DESIGN.md §15](docs/DESIGN.md), not designed.
 
 ---
 
 ## Development
 
 ```sh
-go test ./...              # 337 tests across 14 packages
+go test ./...              # 374 tests across 15 packages
 go vet ./... && gofmt -l .
 ./scripts/build.sh         # all six targets
 
